@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPS Tracker</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- PWA Meta tags -->
+    <meta name="theme-color" content="#2563eb">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="GPS Tracker">
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📍</text></svg>">
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        const GPSLocationTracker = () => {
+          const [isActive, setIsActive] = useState(false);
+          const [currentLocation, setCurrentLocation] = useState(null);
+          const [locationStatus, setLocationStatus] = useState({ color: 'green', status: 'Nouveau lieu' });
+          const [savedLocations, setSavedLocations] = useState([]);
+          const [isGPSAvailable, setIsGPSAvailable] = useState(false);
+          const [currentPlace, setCurrentPlace] = useState('');
+          const [places, setPlaces] = useState([]);
+          const [showPlaceModal, setShowPlaceModal] = useState(false);
+          const [newPlaceName, setNewPlaceName] = useState('');
+          const [foundLocationId, setFoundLocationId] = useState(null);
+          const watchId = useRef(null);
+          const [lastUpdate, setLastUpdate] = useState(null);
+
+          // Précision souhaitée : 5-10m
+          const LOCATION_PRECISION = 10; // mètres
+
+          // Initialisation de la géolocalisation
+          useEffect(() => {
+            if ("geolocation" in navigator) {
+              setIsGPSAvailable(true);
+              // Charger les lieux sauvegardés depuis le stockage local
+              const stored = localStorage.getItem('gpsLocations');
+              if (stored) {
+                setSavedLocations(JSON.parse(stored));
+              }
+              // Charger la liste des lieux
+              const storedPlaces = localStorage.getItem('gpsPlaces');
+              if (storedPlaces) {
+                setPlaces(JSON.parse(storedPlaces));
+              }
+              // Charger le lieu actuel
+              const storedCurrentPlace = localStorage.getItem('currentPlace');
+              if (storedCurrentPlace) {
+                setCurrentPlace(storedCurrentPlace);
+              }
+            } else {
+              setIsGPSAvailable(false);
+            }
+          }, []);
+
+          // Calcul de la distance entre deux points GPS (formule de Haversine)
+          const calculateDistance = (lat1, lon1, lat2, lon2) => {
+            const R = 6371000; // Rayon de la Terre en mètres
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = 
+              Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+              Math.sin(dLon/2) * Math.sin(dLon/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            const distance = R * c;
+            return distance;
+          };
+
+          // Vérifier si la position actuelle correspond à un lieu sauvegardé
+          const checkLocationStatus = (latitude, longitude) => {
+            // Filtrer par lieu actuel
+            const locationsInCurrentPlace = savedLocations.filter(loc => loc.place === currentPlace);
+            
+            for (let location of locationsInCurrentPlace) {
+              const distance = calculateDistance(latitude, longitude, location.lat, location.lon);
+              if (distance <= LOCATION_PRECISION) {
+                setFoundLocationId(location.id);
+                return {
+                  color: location.status === 'vu' ? 'red' : location.status === 'rdv' ? 'blue' : 'green',
+                  status: location.status === 'vu' ? 'Vu' : location.status === 'rdv' ? 'RDV' : 'Non vu',
+                  distance: Math.round(distance)
+                };
+              }
+            }
+            setFoundLocationId(null);
+            return { color: 'green', status: 'Nouveau lieu', distance: null };
+          };
+
+          // Démarrer/arrêter la surveillance GPS
+          const toggleGPSTracking = () => {
+            if (!currentPlace && !isActive) {
+              alert('Veuillez sélectionner un lieu avant de démarrer');
+              return;
+            }
+
+            if (isActive) {
+              // Arrêter la surveillance
+              if (watchId.current) {
+                navigator.geolocation.clearWatch(watchId.current);
+                watchId.current = null;
+              }
+              setIsActive(false);
+              setLocationStatus({ color: 'gray', status: 'Arrêté' });
+              setFoundLocationId(null);
+            } else {
+              // Démarrer la surveillance
+              if (isGPSAvailable) {
+                const options = {
+                  enableHighAccuracy: true,
+                  timeout: 10000,
+                  maximumAge: 5000
+                };
+
+                watchId.current = navigator.geolocation.watchPosition(
+                  (position) => {
+                    const { latitude, longitude } = position.coords;
+                    setCurrentLocation({ lat: latitude, lon: longitude, accuracy: position.coords.accuracy });
+                    const status = checkLocationStatus(latitude, longitude);
+                    setLocationStatus(status);
+                    setLastUpdate(new Date().toLocaleTimeString());
+                  },
+                  (error) => {
+                    console.error('Erreur GPS:', error);
+                    setLocationStatus({ color: 'orange', status: 'Erreur GPS' });
+                  },
+                  options
+                );
+                setIsActive(true);
+              }
+            }
+          };
+
+          // Sauvegarder un lieu avec son statut
+          const saveLocation = (status) => {
+            if (!currentLocation || !currentPlace) {
+              alert('Position GPS et lieu requis');
+              return;
+            }
+
+            // Si on est sur un lieu existant, le modifier
+            if (foundLocationId) {
+              const updatedLocations = savedLocations.map(loc => 
+                loc.id === foundLocationId 
+                  ? { ...loc, status: status, timestamp: new Date().toISOString() }
+                  : loc
+              );
+              setSavedLocations(updatedLocations);
+              localStorage.setItem('gpsLocations', JSON.stringify(updatedLocations));
+            } else {
+              // Créer un nouveau lieu
+              const newLocation = {
+                id: Date.now(),
+                lat: currentLocation.lat,
+                lon: currentLocation.lon,
+                status: status,
+                place: currentPlace,
+                timestamp: new Date().toISOString()
+              };
+
+              const updatedLocations = [...savedLocations, newLocation];
+              setSavedLocations(updatedLocations);
+              localStorage.setItem('gpsLocations', JSON.stringify(updatedLocations));
+            }
+            
+            // Mettre à jour l'affichage
+            const newStatus = checkLocationStatus(currentLocation.lat, currentLocation.lon);
+            setLocationStatus(newStatus);
+          };
+
+          // Gestion des lieux
+          const addPlace = () => {
+            if (newPlaceName.trim()) {
+              const updatedPlaces = [...places, newPlaceName.trim()];
+              setPlaces(updatedPlaces);
+              localStorage.setItem('gpsPlaces', JSON.stringify(updatedPlaces));
+              setCurrentPlace(newPlaceName.trim());
+              localStorage.setItem('currentPlace', newPlaceName.trim());
+              setNewPlaceName('');
+              setShowPlaceModal(false);
+            }
+          };
+
+          const selectPlace = (place) => {
+            setCurrentPlace(place);
+            localStorage.setItem('currentPlace', place);
+            // Réévaluer le statut si GPS actif
+            if (isActive && currentLocation) {
+              const status = checkLocationStatus(currentLocation.lat, currentLocation.lon);
+              setLocationStatus(status);
+            }
+          };
+
+          // Remise à zéro des données du lieu actuel
+          const resetPlaceData = () => {
+            if (currentPlace && confirm(`Supprimer toutes les données du lieu "${currentPlace}" ?`)) {
+              const filteredLocations = savedLocations.filter(loc => loc.place !== currentPlace);
+              setSavedLocations(filteredLocations);
+              localStorage.setItem('gpsLocations', JSON.stringify(filteredLocations));
+              
+              // Réévaluer le statut
+              if (isActive && currentLocation) {
+                const status = checkLocationStatus(currentLocation.lat, currentLocation.lon);
+                setLocationStatus(status);
+              }
+            }
+          };
+
+          // Supprimer un lieu complètement
+          const deletePlace = (placeToDelete) => {
+            if (confirm(`Supprimer le lieu "${placeToDelete}" et toutes ses données ?`)) {
+              // Supprimer le lieu de la liste
+              const filteredPlaces = places.filter(p => p !== placeToDelete);
+              setPlaces(filteredPlaces);
+              localStorage.setItem('gpsPlaces', JSON.stringify(filteredPlaces));
+              
+              // Supprimer toutes les données de ce lieu
+              const filteredLocations = savedLocations.filter(loc => loc.place !== placeToDelete);
+              setSavedLocations(filteredLocations);
+              localStorage.setItem('gpsLocations', JSON.stringify(filteredLocations));
+              
+              // Si c'était le lieu actuel, le déselectionner
+              if (currentPlace === placeToDelete) {
+                setCurrentPlace('');
+                localStorage.removeItem('currentPlace');
+              }
+            }
+          };
+
+          // Statistiques du lieu actuel
+          const getCurrentPlaceStats = () => {
+            const currentPlaceLocations = savedLocations.filter(loc => loc.place === currentPlace);
+            return {
+              nonVu: currentPlaceLocations.filter(l => l.status === 'non_vu').length,
+              vu: currentPlaceLocations.filter(l => l.status === 'vu').length,
+              rdv: currentPlaceLocations.filter(l => l.status === 'rdv').length,
+              total: currentPlaceLocations.length
+            };
+          };
+
+          // Couleurs pour le voyant
+          const getIndicatorColor = () => {
+            switch(locationStatus.color) {
+              case 'red': return 'bg-red-500';
+              case 'blue': return 'bg-blue-500';
+              case 'green': return 'bg-green-500';
+              case 'orange': return 'bg-orange-500';
+              case 'gray': return 'bg-gray-500';
+              default: return 'bg-green-500';
+            }
+          };
+
+          return React.createElement('div', { className: "max-w-md mx-auto bg-white min-h-screen" },
+            // Header avec sélection de lieu
+            React.createElement('div', { className: "bg-blue-600 text-white p-4" },
+              React.createElement('h1', { className: "text-xl font-bold flex items-center gap-2 mb-3" },
+                React.createElement('span', null, "📍"),
+                "GPS Tracker"
+              ),
+              
+              // Sélection du lieu
+              React.createElement('div', { className: "space-y-2" },
+                React.createElement('div', { className: "flex items-center gap-2" },
+                  React.createElement('span', null, "🗺️"),
+                  React.createElement('span', { className: "text-sm" }, "Lieu actuel:")
+                ),
+                
+                React.createElement('div', { className: "flex gap-2" },
+                  React.createElement('select', {
+                    value: currentPlace,
+                    onChange: (e) => selectPlace(e.target.value),
+                    className: "flex-1 px-3 py-2 rounded text-gray-800 text-sm",
+                    disabled: isActive
+                  },
+                    React.createElement('option', { value: "" }, "Sélectionner un lieu..."),
+                    places.map(place => 
+                      React.createElement('option', { key: place, value: place }, place)
+                    )
+                  ),
+                  
+                  React.createElement('button', {
+                    onClick: () => setShowPlaceModal(true),
+                    className: "px-3 py-2 bg-blue-500 hover:bg-blue-400 rounded flex items-center gap-1",
+                    disabled: isActive
+                  }, "+")
+                ),
+                
+                currentPlace && React.createElement('div', { className: "flex gap-2 mt-2" },
+                  React.createElement('button', {
+                    onClick: resetPlaceData,
+                    className: "flex-1 px-3 py-1 bg-orange-500 hover:bg-orange-400 rounded text-xs flex items-center justify-center gap-1",
+                    disabled: isActive
+                  },
+                    React.createElement('span', null, "🗑️"),
+                    "Remise à zéro"
+                  ),
+                  React.createElement('button', {
+                    onClick: () => deletePlace(currentPlace),
+                    className: "flex-1 px-3 py-1 bg-red-500 hover:bg-red-400 rounded text-xs flex items-center justify-center gap-1",
+                    disabled: isActive
+                  },
+                    React.createElement('span', null, "🗑️"),
+                    "Supprimer lieu"
+                  )
+                )
+              )
+            ),
+
+            // Voyant indicateur
+            React.createElement('div', { className: "p-6 text-center" },
+              React.createElement('div', { className: `w-24 h-24 rounded-full ${getIndicatorColor()} mx-auto mb-4 flex items-center justify-center shadow-lg` },
+                React.createElement('div', { className: "w-16 h-16 bg-white bg-opacity-30 rounded-full" })
+              ),
+              React.createElement('h2', { className: "text-lg font-semibold text-gray-800" }, locationStatus.status),
+              locationStatus.distance && React.createElement('p', { className: "text-sm text-gray-600" }, `Distance: ${locationStatus.distance}m`)
+            ),
+
+            // Bouton ON/OFF
+            React.createElement('div', { className: "px-6 mb-6" },
+              React.createElement('button', {
+                onClick: toggleGPSTracking,
+                disabled: !isGPSAvailable || !currentPlace,
+                className: `w-full py-4 rounded-lg font-semibold text-white flex items-center justify-center gap-2 ${
+                  isActive 
+                    ? 'bg-red-500 hover:bg-red-600' 
+                    : 'bg-green-500 hover:bg-green-600'
+                } ${(!isGPSAvailable || !currentPlace) ? 'opacity-50 cursor-not-allowed' : ''}`
+              },
+                React.createElement('span', null, "⚡"),
+                isActive ? 'ARRÊTER' : 'DÉMARRER'
+              ),
+              !currentPlace && React.createElement('p', { className: "text-center text-sm text-gray-500 mt-2" },
+                "Sélectionnez un lieu pour démarrer"
+              )
+            ),
+
+            // Informations GPS
+            currentLocation && React.createElement('div', { className: "px-6 mb-6 bg-gray-50 p-4 rounded-lg mx-6" },
+              React.createElement('h3', { className: "font-semibold mb-2 flex items-center gap-2" },
+                React.createElement('span', null, "🧭"),
+                "Position actuelle"
+              ),
+              React.createElement('p', { className: "text-sm text-gray-600" }, `Lat: ${currentLocation.lat.toFixed(6)}`),
+              React.createElement('p', { className: "text-sm text-gray-600" }, `Lon: ${currentLocation.lon.toFixed(6)}`),
+              React.createElement('p', { className: "text-sm text-gray-600" }, `Précision: ±${Math.round(currentLocation.accuracy)}m`),
+              lastUpdate && React.createElement('p', { className: "text-xs text-gray-500 mt-1" }, `Dernière MAJ: ${lastUpdate}`)
+            ),
+
+            // Boutons d'actions
+            React.createElement('div', { className: "px-6 space-y-3" },
+              React.createElement('button', {
+                onClick: () => saveLocation('non_vu'),
+                disabled: !currentLocation || !currentPlace,
+                className: "w-full py-3 bg-green-500 hover:bg-green-600 disabled:bg-gray-300 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+              },
+                foundLocationId && React.createElement('span', null, "✏️"),
+                "NON VU"
+              ),
+              
+              React.createElement('button', {
+                onClick: () => saveLocation('vu'),
+                disabled: !currentLocation || !currentPlace,
+                className: "w-full py-3 bg-red-500 hover:bg-red-600 disabled:bg-gray-300 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+              },
+                foundLocationId && React.createElement('span', null, "✏️"),
+                "VU"
+              ),
+              
+              React.createElement('button', {
+                onClick: () => saveLocation('rdv'),
+                disabled: !currentLocation || !currentPlace,
+                className: "w-full py-3 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+              },
+                foundLocationId && React.createElement('span', null, "✏️"),
+                "RDV"
+              )
+            ),
+
+            // Statistiques
+            React.createElement('div', { className: "px-6 mt-6 mb-4" },
+              React.createElement('div', { className: "bg-gray-50 p-4 rounded-lg" },
+                React.createElement('h3', { className: "font-semibold mb-2 flex items-center gap-2" },
+                  React.createElement('span', null, "📊"),
+                  `Statistiques ${currentPlace ? `- ${currentPlace}` : ''}`
+                ),
+                currentPlace ? React.createElement('div', null,
+                  React.createElement('div', { className: "grid grid-cols-3 gap-4 text-center" },
+                    React.createElement('div', null,
+                      React.createElement('div', { className: "text-lg font-bold text-green-600" }, getCurrentPlaceStats().nonVu),
+                      React.createElement('div', { className: "text-xs text-gray-600" }, "Non vus")
+                    ),
+                    React.createElement('div', null,
+                      React.createElement('div', { className: "text-lg font-bold text-red-600" }, getCurrentPlaceStats().vu),
+                      React.createElement('div', { className: "text-xs text-gray-600" }, "Vus")
+                    ),
+                    React.createElement('div', null,
+                      React.createElement('div', { className: "text-lg font-bold text-blue-600" }, getCurrentPlaceStats().rdv),
+                      React.createElement('div', { className: "text-xs text-gray-600" }, "RDV")
+                    )
+                  ),
+                  React.createElement('div', { className: "text-center mt-2" },
+                    React.createElement('div', { className: "text-lg font-bold text-gray-700" }, getCurrentPlaceStats().total),
+                    React.createElement('div', { className: "text-xs text-gray-600" }, "Total dans ce lieu")
+                  )
+                ) : React.createElement('div', { className: "text-center text-gray-500 py-4" },
+                  "Sélectionnez un lieu pour voir les statistiques"
+                )
+              )
+            ),
+
+            // Messages d'aide
+            !isGPSAvailable && React.createElement('div', { className: "px-6 mb-4" },
+              React.createElement('div', { className: "bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded" },
+                "GPS non disponible sur cet appareil"
+              )
+            ),
+
+            // Modal d'ajout de lieu
+            showPlaceModal && React.createElement('div', { className: "fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" },
+              React.createElement('div', { className: "bg-white p-6 rounded-lg mx-4 w-full max-w-sm" },
+                React.createElement('h3', { className: "text-lg font-semibold mb-4" }, "Nouveau lieu"),
+                React.createElement('input', {
+                  type: "text",
+                  value: newPlaceName,
+                  onChange: (e) => setNewPlaceName(e.target.value),
+                  placeholder: "Nom du lieu (ex: Village A, Zone B...)",
+                  className: "w-full px-3 py-2 border border-gray-300 rounded mb-4",
+                  autoFocus: true
+                }),
+                React.createElement('div', { className: "flex gap-2" },
+                  React.createElement('button', {
+                    onClick: () => setShowPlaceModal(false),
+                    className: "flex-1 px-4 py-2 bg-gray-300 hover:bg-gray-400 rounded"
+                  }, "Annuler"),
+                  React.createElement('button', {
+                    onClick: addPlace,
+                    disabled: !newPlaceName.trim(),
+                    className: "flex-1 px-4 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 text-white rounded"
+                  }, "Créer")
+                )
+              )
+            )
+          );
+        };
+
+        ReactDOM.render(React.createElement(GPSLocationTracker), document.getElementById('root'));
+    </script>
+</body>
+</html>
